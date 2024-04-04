@@ -29,7 +29,7 @@ var (
 	metric                              stats
 	host, from, to, subject, body, helo string
 	workers, count, jobs, size, timeout int
-	balance, showerror                  bool
+	balance, showerror, journal         bool
 	outbound                            string
 )
 
@@ -50,6 +50,32 @@ const (
 		`To: %s` + "\r\n" +
 		`Subject: %s` + "\r\n\r\n" +
 		`%s`
+
+	bodyJournalTemplate = `Content-Type: multipart/mixed; boundary="_%s_"` + "\r\n" +
+		`MIME-Version: 1.0` + "\r\n" +
+		`Message-ID: <%s.FakeJournalMail.Golang@HappyDay>` + "\r\n" +
+		`Date: <%s>` + "\r\n" +
+		`From: <%s>` + "\r\n" +
+		`To: %s` + "\r\n" +
+		`Subject: %s` + "\r\n\r\n" +
+		`--_%s_` + "\r\n" +
+		`Content-Type: text/plain; charset="us-ascii"` + "\r\n" +
+		`Content-Transfer-Encoding: 7bit` + "\r\n" +
+		`MIME-Version: 1.0` + "\r\n\r\n" +
+		`%s` + "\r\n" + // plain text body
+		`--_%s_` + "\r\n" +
+		`Content-Type: message/rfc822` + "\r\n\r\n" +
+		`MIME-Version: 1.0` + "\r\n" +
+		`Message-ID: <%s.FakeRedirectedMail.Golang@HappyDay>` + "\r\n" +
+		`Date: <%s>` + "\r\n" +
+		`From: <%s>` + "\r\n" +
+		`To: %s` + "\r\n" +
+		`Subject: %s` + "\r\n\r\n" +
+		`Content-Type: text/html; charset=utf-8` + "\r\n" +
+		`Content-Transfer-Encoding: base64` + "\r\n" +
+		`Content-Disposition: attachment; filename= PDF_200KB.pdf` + "\r\n\r\n" +
+		`%s` + "\r\n" + // base64 encoded pdf
+		`--_%s_--` + "\r\n"
 
 	dialTimeout   = time.Second * 6
 	letterIdxBits = 6
@@ -72,6 +98,7 @@ func init() {
 	flag.IntVar(&size, "size", 5, "size=5 (Kilobyte)")
 	flag.BoolVar(&balance, "balance", false, "-balance")
 	flag.BoolVar(&showerror, "showerror", true, "-showerror")
+	flag.BoolVar(&journal, "journal", false, "-journal to emulate journaling (email inside email)")
 	//TODO: timeout
 
 	flag.Usage = usage
@@ -156,7 +183,15 @@ func start() (startTime time.Time, endTime time.Time) {
 		log.Fatal("pool not created:", err)
 	}
 
-	body = createBodyFixedSize(size)
+	if !journal {
+		body = createBodyFixedSize(size)
+	} else {
+		var errPDF error
+		body, errPDF = createPDFWithTargetSize(size)
+		if errPDF != nil {
+			log.Fatal("PDF not created:", errPDF)
+		}
+	}
 
 	uuids := prepareUUIDs(count)
 	emails := prepareFakeEmails(count, strings.Split(from, "@")[1])
@@ -294,7 +329,12 @@ func sendMail(outbound, smtpServer, from, to, subject, body, helo string, messag
 	dataTime := time.Now()
 
 	// template the message body with the message ID and other parameters
-	msg = fmt.Sprintf(bodyTemplate, messageID, messageDate, from, to, subject, body)
+	if !journal {
+		msg = fmt.Sprintf(bodyTemplate, messageID, messageDate, from, to, subject, body)
+	} else {
+		msg = fmt.Sprintf(bodyJournalTemplate, messageID, messageID, messageDate, from, to, subject, messageID, "Test email, sorry, no message to analyze", messageID, messageID, messageDate, from, to, subject, body, messageID)
+	}
+
 	wc, err = c.Data()
 
 	if err != nil {

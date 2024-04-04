@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"math/rand"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jung-kurt/gofpdf"
 )
 
 func prepareUUIDs(count int) (uuids []string) {
@@ -218,4 +221,43 @@ func generateRandomText(minSize int, maxSize int) string {
 	text := strings.Join(subjectWords, " ")
 
 	return text
+}
+func createPDFWithTargetSize(targetSizeKB int) (string, error) {
+	var base64Str string
+	// Start with an estimated amount of content
+	estimatedContent := `
+	Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus bibendum, nunc ut hendrerit venenatis, ex nulla cursus risus, sed tempus libero mauris eget felis. Etiam a justo vitae purus facilisis ullamcorper. Here’s a joke for you: Why don’t scientists trust atoms anymore? Because they make up everything!
+Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo. Meanwhile, have you heard about the mathematician who’s afraid of negative numbers? He will stop at nothing to avoid them!
+Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt. Speaking of fear, why was the computer cold? It left its Windows open!
+Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur, adipisci velit, sed quia non numquam eius modi tempora incidunt ut labore et dolore magnam aliquam quaerat voluptatem. On a lighter note, what do you call fake spaghetti? An impasta!
+Ut enim ad minima veniam, quis nostrum exercitationem ullam corporis suscipit laboriosam, nisi ut aliquid ex ea commodi consequatur? Quis autem vel eum iure reprehenderit qui in ea voluptate velit esse quam nihil molestiae consequatur, vel illum qui dolorem eum fugiat quo voluptas nulla pariatur? To wrap it up, remember, always borrow money from a pessimist. They won’t expect it back!
+`
+
+	for {
+		pdf := gofpdf.New("P", "mm", "A4", "")
+		pdf.AddPage()
+		pdf.SetFont("Arial", "", 16)
+		pdf.MultiCell(190, 10, estimatedContent, "0", "L", false)
+
+		var buf bytes.Buffer
+		err := pdf.Output(&buf)
+		if err != nil {
+			return "", err
+		}
+
+		currentSizeKB := buf.Len() / 1024
+		if currentSizeKB > targetSizeKB {
+			// Adjust estimatedContent to reduce size
+			break // Replace with actual logic to reduce content
+		} else if currentSizeKB < targetSizeKB {
+			// Adjust estimatedContent to increase size
+			break // Replace with actual logic to increase content
+		} else {
+			// Size is within acceptable range
+			base64Str = base64.StdEncoding.EncodeToString(buf.Bytes())
+			break
+		}
+	}
+
+	return base64Str, nil
 }
