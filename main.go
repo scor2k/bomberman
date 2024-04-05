@@ -29,7 +29,7 @@ var (
 	metric                              stats
 	host, from, to, subject, body, helo string
 	workers, count, jobs, size, timeout int
-	balance, showerror                  bool
+	balance, showerror, journal         bool
 	outbound                            string
 )
 
@@ -44,10 +44,38 @@ const (
 		`End			: %v` + "\n" +
 		`Time			: %v` + "\n"
 
-	bodyTemplate = `from: <%s>` + "\r\n" +
-		`to: %s` + "\r\n" +
+	bodyTemplate = `Message-ID: <%s.FakeMail.Golang@HappyDay>` + "\r\n" +
+		`Date: <%s>` + "\r\n" +
+		`From: <%s>` + "\r\n" +
+		`To: %s` + "\r\n" +
 		`Subject: %s` + "\r\n\r\n" +
 		`%s`
+
+	bodyJournalTemplate = `Content-Type: multipart/mixed; boundary="_%s_"` + "\r\n" +
+		`MIME-Version: 1.0` + "\r\n" +
+		`Message-ID: <%s.FakeJournalMail.Golang@HappyDay>` + "\r\n" +
+		`Date: <%s>` + "\r\n" +
+		`From: <%s>` + "\r\n" +
+		`To: %s` + "\r\n" +
+		`Subject: %s` + "\r\n\r\n" +
+		`--_%s_` + "\r\n" +
+		`Content-Type: text/plain; charset="us-ascii"` + "\r\n" +
+		`Content-Transfer-Encoding: 7bit` + "\r\n" +
+		`MIME-Version: 1.0` + "\r\n\r\n" +
+		`%s` + "\r\n" + // plain text body
+		`--_%s_` + "\r\n" +
+		`Content-Type: message/rfc822` + "\r\n\r\n" +
+		`MIME-Version: 1.0` + "\r\n" +
+		`Message-ID: <%s.FakeRedirectedMail.Golang@HappyDay>` + "\r\n" +
+		`Date: <%s>` + "\r\n" +
+		`From: <%s>` + "\r\n" +
+		`To: %s` + "\r\n" +
+		`Subject: %s` + "\r\n\r\n" +
+		`Content-Type: text/html; charset=utf-8` + "\r\n" +
+		`Content-Transfer-Encoding: base64` + "\r\n" +
+		`Content-Disposition: attachment; filename= PDF_200KB.pdf` + "\r\n\r\n" +
+		`%s` + "\r\n" + // base64 encoded pdf
+		`--_%s_--` + "\r\n"
 
 	dialTimeout   = time.Second * 6
 	letterIdxBits = 6
@@ -70,6 +98,7 @@ func init() {
 	flag.IntVar(&size, "size", 5, "size=5 (Kilobyte)")
 	flag.BoolVar(&balance, "balance", false, "-balance")
 	flag.BoolVar(&showerror, "showerror", true, "-showerror")
+	flag.BoolVar(&journal, "journal", false, "-journal to emulate journaling (email inside email)")
 	//TODO: timeout
 
 	flag.Usage = usage
@@ -98,9 +127,7 @@ func main() {
 
 	flag.Parse()
 
-	startTime := time.Now()
-	start()
-	endtime := time.Now()
+	startTime, endtime := start()
 
 	printResults(balance, startTime, endtime)
 }
@@ -144,7 +171,7 @@ func printResults(balanced bool, startTime, endtime time.Time) {
 	fmt.Println("")
 }
 
-func start() {
+func start() (startTime time.Time, endTime time.Time) {
 
 	pool := grpool.NewPool(workers, jobs)
 	defer pool.Release()
@@ -156,14 +183,30 @@ func start() {
 		log.Fatal("pool not created:", err)
 	}
 
-	body = createBodyFixedSize(size)
+	if !journal {
+		body = createBodyFixedSize(size)
+	} else {
+		var errPDF error
+		body, errPDF = createPDFWithTargetSize(size)
+		if errPDF != nil {
+			log.Fatal("PDF not created:", errPDF)
+		}
+	}
 
+	uuids := prepareUUIDs(count)
+	emails := prepareFakeEmails(count, strings.Split(from, "@")[1])
+	subjects := prepareFakeSubjects(count)
+	messageDate := time.Now().Format(time.RFC1123Z)
+
+	startTime = time.Now()
 	for i := 0; i < count; i++ {
 
 		if balance {
 			outbound = sequental(i, iplist)
 			metric.SrcIPStats = append(metric.SrcIPStats, outbound)
 		}
+
+		iLocal := i
 
 		pool.JobQueue <- func() {
 
@@ -173,11 +216,13 @@ func start() {
 
 			durs, remoteip, err := sendMail(outbound,
 				host,
-				from,
+				emails[iLocal],
 				to,
-				subject,
+				subjects[iLocal],
 				body,
-				helo)
+				helo,
+				uuids[iLocal],
+				messageDate)
 
 			if err != nil {
 				if showerror {
@@ -195,10 +240,25 @@ func start() {
 	}
 
 	pool.WaitAll()
+	endTime = time.Now()
 
+	return
 }
 
-func sendMail(outbound, smtpServer, from, to, subject, body, helo string) (metric map[string]time.Duration, remoteip string, err error) {
+// sendMail sends an email using the provided SMTP server.
+// It takes the following parameters:
+// - outbound: The outbound IP address or hostname.
+// - smtpServer: The SMTP server address.
+// - from: The email address of the sender.
+// - to: The email address of the recipient.
+// - subject: The subject of the email.
+// - body: The body of the email.
+// - helo: The HELO/EHLO hostname.
+// It returns the following values:
+// - metric: A map containing the duration of each step in the email sending process.
+// - remoteip: The IP address of the remote SMTP server.
+// - err: An error, if any occurred during the email sending process.
+func sendMail(outbound, smtpServer, from, to, subject, body, helo string, messageID string, messageDate string) (metric map[string]time.Duration, remoteip string, err error) {
 
 	var wc io.WriteCloser
 	var msg string
@@ -211,23 +271,23 @@ func sendMail(outbound, smtpServer, from, to, subject, body, helo string) (metri
 
 	if err != nil {
 		err = fmt.Errorf("DIAL: %v (out:%s)", err, outbound)
-		metric["DIAL"] = time.Now().Sub(startTime)
+		metric["DIAL"] = time.Since(startTime)
 		return
 	}
 
 	remoteip = conn.RemoteAddr().String() //remoteip
-	metric["DIAL"] = time.Now().Sub(startTime)
+	metric["DIAL"] = time.Since(startTime)
 
 	newclientTime := time.Now()
 	c, err := smtp.NewClient(conn, host)
 
 	if err != nil {
 		err = fmt.Errorf("TOUCH: %v", err)
-		metric["TOUCH"] = time.Now().Sub(newclientTime)
+		metric["TOUCH"] = time.Since(newclientTime)
 		return
 	}
 
-	metric["TOUCH"] = time.Now().Sub(newclientTime)
+	metric["TOUCH"] = time.Since(newclientTime)
 	defer c.Close()
 
 	helloTime := time.Now()
@@ -235,45 +295,51 @@ func sendMail(outbound, smtpServer, from, to, subject, body, helo string) (metri
 
 	if err != nil {
 		err = fmt.Errorf("HELO: %v", err)
-		metric["HELO"] = time.Now().Sub(helloTime)
+		metric["HELO"] = time.Since(helloTime)
 
 		return
 	}
 
-	metric["HELO"] = time.Now().Sub(helloTime)
+	metric["HELO"] = time.Since(helloTime)
 
 	mailTime := time.Now()
 	err = c.Mail(from)
 
 	if err != nil {
 		err = fmt.Errorf("MAIL: %v", err)
-		metric["MAIL"] = time.Now().Sub(mailTime)
+		metric["MAIL"] = time.Since(mailTime)
 
 		return
 	}
 
-	metric["MAIL"] = time.Now().Sub(mailTime)
+	metric["MAIL"] = time.Since(mailTime)
 
 	rcptTime := time.Now()
 	err = c.Rcpt(to)
 
 	if err != nil {
 		err = fmt.Errorf("RCPT: %v", err)
-		metric["RCPT"] = time.Now().Sub(rcptTime)
+		metric["RCPT"] = time.Since(rcptTime)
 
 		return
 	}
 
-	metric["RCPT"] = time.Now().Sub(rcptTime)
+	metric["RCPT"] = time.Since(rcptTime)
 
 	dataTime := time.Now()
 
-	msg = fmt.Sprintf(bodyTemplate, from, to, subject, body)
+	// template the message body with the message ID and other parameters
+	if !journal {
+		msg = fmt.Sprintf(bodyTemplate, messageID, messageDate, from, to, subject, body)
+	} else {
+		msg = fmt.Sprintf(bodyJournalTemplate, messageID, messageID, messageDate, from, to, subject, messageID, "Test email, sorry, no message to analyze", messageID, messageID, messageDate, from, to, subject, body, messageID)
+	}
+
 	wc, err = c.Data()
 
 	if err != nil {
 		err = fmt.Errorf("DATA: %v", err)
-		metric["DATA"] = time.Now().Sub(dataTime)
+		metric["DATA"] = time.Since(dataTime)
 
 		return
 	}
@@ -284,24 +350,24 @@ func sendMail(outbound, smtpServer, from, to, subject, body, helo string) (metri
 
 	if err != nil {
 		err = fmt.Errorf("DATA: %v", err)
-		metric["DATA"] = time.Now().Sub(dataTime)
+		metric["DATA"] = time.Since(dataTime)
 
 		return
 	}
 
-	metric["DATA"] = time.Now().Sub(dataTime)
+	metric["DATA"] = time.Since(dataTime)
 
 	quitTime := time.Now()
 	err = c.Quit()
 
 	if err != nil {
 		err = fmt.Errorf("QUIT: %v", err)
-		metric["QUIT"] = time.Now().Sub(quitTime)
+		metric["QUIT"] = time.Since(quitTime)
 
 		return
 	}
 
-	metric["SUCCESS"] = time.Now().Sub(startTime)
+	metric["SUCCESS"] = time.Since(startTime)
 
 	return
 }
